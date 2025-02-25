@@ -16,6 +16,19 @@ __global__ void test_ldmatrix(half *load, half *store) {
   *(float *)(&(store[start_index + 2])) = *(float *)(&(reg[1]));
   *(float *)(&(store[start_index + 4])) = *(float *)(&(reg[2]));
   *(float *)(&(store[start_index + 6])) = *(float *)(&(reg[3]));
+
+  if (threadIdx.x == 0) {
+
+    printf("R0: %f  %f\n", __half2float(*(half *)(&(reg[0]))), __half2float(*((half *)(&(reg[0])) + 1)));
+    printf("R1: %f  %f\n", __half2float(*(half *)(&(reg[1]))), __half2float(*((half *)(&(reg[1])) + 1)));
+    printf("R2: %f  %f\n", __half2float(*(half *)(&(reg[2]))), __half2float(*((half *)(&(reg[2])) + 1)));
+    printf("R3: %f  %f\n", __half2float(*(half *)(&(reg[3]))), __half2float(*((half *)(&(reg[3])) + 1)));
+
+    // printf("R0: %f\n", __half2float(*((half *)(&(reg[0])) + 1)));
+    // printf("R1: %f\n", __half2float(*((half *)(&(reg[1])) + 1)));
+    // printf("R2: %f\n", __half2float(*((half *)(&(reg[2])) + 1)));
+    // printf("R3: %f\n",  __half2float(*((half *)(&(reg[3])) + 1)));
+  }
 }
 
 void init_mem(half *ptr, int N) {
@@ -25,13 +38,13 @@ void init_mem(half *ptr, int N) {
 }
 
 int main() {
-  half h_in[4* 8 * 8 ];
+  half h_in[4 * 8 * 8];
   half h_out[4 * 8 * 8];
   half *d_in, *d_out;
 
-  init_mem(h_in, 4* 8 * 8);
+  init_mem(h_in, 4 * 8 * 8);
 
-  constexpr int data_size = 4* 8 * 8 * sizeof(half);
+  constexpr int data_size = 4 * 8 * 8 * sizeof(half);
 
   cudaMalloc(&d_in, data_size);
   cudaMalloc(&d_out, data_size);
