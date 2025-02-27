@@ -4,9 +4,9 @@
 
 #define OFFSET(row, col, ld) ((row) * (ld) + (col))
 
-const int M = 32;
-const int N = 32;
-const int K = 16;
+const int M = 16;
+const int N = 16;
+const int K = 8;
 
 __host__ void initialize_matrices(half* A, half* B, float* C) {
     for (int i = 0; i < M * K; i++) {
@@ -224,13 +224,13 @@ int main() {
     cudaMemcpy(d_B, h_B, K * N * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_C, h_C, M * N * sizeof(float), cudaMemcpyHostToDevice);
 
-    const int BM = 32;
-    const int BN = 32;
+    const int BM = 16;
+    const int BN = 16;
     const int WARP_NUM = (BM * BN) / (16 * 8);
     dim3 block_dim(WARP_NUM * 32);
     dim3 grid_dim(1, 1);
 
-    mma_m16n8k16_ptx<BM, BN><<<grid_dim, block_dim>>>(d_A, d_B, M, N, K, d_C);
+    mma_m16n8k16_ptx2<BM, BN><<<grid_dim, block_dim>>>(d_A, d_B, M, N, K, d_C);
     cudaMemcpy(h_C, d_C, M * N * sizeof(float), cudaMemcpyDeviceToHost);
 
     // Validate results
