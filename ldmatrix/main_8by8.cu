@@ -8,16 +8,16 @@ __global__ void test_ldmatrix(half *load, half *store) {
   const int start_index = threadIdx.x %8 * 8;
   *(float4 *)(&(smem[start_index])) = *(float4 *)(&(load[start_index]));
 
-  asm("ldmatrix.sync.aligned.m8n8.x1.trans.b16 {%0}, [%1];\n\t"
+  asm("ldmatrix.sync.aligned.m8n8.x1.b16 {%0}, [%1];\n\t"
       : "=r"(reg[0]): "l"(&smem[start_index]));
 
   *(float *)(&(store[threadIdx.x * 2])) = *(float *)(&(reg[0]));
   
-//  if (threadIdx.x == 0) {
-//    store[0] = *(half *)(&(reg[0]));
-//    store[1] = *((half *)(&(reg[0])) + 1);
-//    printf("T0 R0: %f  %f\n", __half2float(*(half *)(&(reg[0]))), __half2float(*((half *)(&(reg[0])) + 1)));
-//  }
+ if (threadIdx.x == 0) {
+   store[0] = *(half *)(&(reg[0]));
+   store[1] = *((half *)(&(reg[0])) + 1);
+   printf("T0 R0: %f  %f\n", __half2float(*(half *)(&(reg[0]))), __half2float(*((half *)(&(reg[0])) + 1)));
+ }
 
    __syncthreads();
 }
@@ -47,7 +47,7 @@ int main() {
       48,49,50,51,52,53,54,55,
       56,57,58,59,60,61,62,63
   };
-#if 1
+#if 0
   half h_in_trans[64] = {
     0,8, 16,24,32,40,48,56,
     1, 9, 17,25,33,41,49,57,
