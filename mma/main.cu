@@ -4,22 +4,34 @@
 
 #define OFFSET(row, col, ld) ((row) * (ld) + (col))
 
-const int M = 16;
-const int N = 16;
-const int K = 8;
+const int M = 32;
+const int N = 32;
+const int K = 16;
 
-__host__ void initialize_matrices(half* A, half* B, float* C) {
-    for (int i = 0; i < M * K; i++) {
-        A[i] = __float2half(1.0f); // Initialize A with 1.0
+__host__ void initialize_matrices(half *A, half *B, float *C) {
+
+  for (int i = 0; i < M; ++i) {
+    for (int j = 0; j < K; ++j) {
+      A[i * K + j] = __float2half(1.0f);
     }
-    for (int i = 0; i < K * N; i++) {
-        B[i] = __float2half(1.0f); // Initialize B with 1.0
+  }
+
+  for (int i = 0; i < K; ++i) {
+    for (int j = 0; j < N; ++j) {
+      B[i * N + j] = __float2half(1.0f);
     }
-    for (int i = 0; i < M * N; i++) {
-        C[i] = 0.0f; // Initialize C with 0.0
-    }
+  }
+
+  // for (int i = 0; i < M * K; i++) {
+  //     A[i] = __float2half(1.0f); // Initialize A with 1.0
+  // }
+  // for (int i = 0; i < K * N; i++) {
+  //     B[i] = __float2half(1.0f); // Initialize B with 1.0
+  // }
+  for (int i = 0; i < M * N; i++) {
+    C[i] = 0.0f; // Initialize C with 0.0
+  }
 }
-
 
 #define WARP_SIZE 32
 
@@ -207,14 +219,29 @@ __global__ void mma_m16n8k16_ptx2(half* A, half* B, int M, int N, int K, float* 
       c[3];
 }
 
+void matrix_multiplication_cpu(half* A, half* B, float* C, int m, int n, int k) {
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            float sum = 0.0;
+            for (int k = 0; k < K; ++k) {
+                sum += __half2float(A[i * K + k]) * __half2float(B[k * N + j]);
+            }
+            C[i * N + j] = sum;
+        }
+    }
+}
 
 int main() {
     half *d_A, *d_B;
     float *d_C;
     half h_A[M * K], h_B[K * N];
     float h_C[M * N];
+    float h_C_ref[M * N];
 
     initialize_matrices(h_A, h_B, h_C);
+
+
+    matrix_multiplication_cpu(h_A, h_B, h_C_ref, M, N, K);
 
     cudaMalloc(&d_A, M * K * sizeof(half));
     cudaMalloc(&d_B, K * N * sizeof(half));
@@ -224,20 +251,46 @@ int main() {
     cudaMemcpy(d_B, h_B, K * N * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_C, h_C, M * N * sizeof(float), cudaMemcpyHostToDevice);
 
-    const int BM = 16;
-    const int BN = 16;
+    const int BM = 32;
+    const int BN = 32;
     const int WARP_NUM = (BM * BN) / (16 * 8);
     dim3 block_dim(WARP_NUM * 32);
     dim3 grid_dim(1, 1);
 
-    mma_m16n8k16_ptx2<BM, BN><<<grid_dim, block_dim>>>(d_A, d_B, M, N, K, d_C);
+    mma_m16n8k16_ptx<BM, BN><<<grid_dim, block_dim>>>(d_A, d_B, M, N, K, d_C);
     cudaMemcpy(h_C, d_C, M * N * sizeof(float), cudaMemcpyDeviceToHost);
 
     // Validate results
     float expected = K * 1.0f;
     bool correct = true;
+    // for (int i = 0; i < M * N; i++) {
+    //     if (fabs(h_C[i] - expected) > 1e-3) {
+    //         correct = false;
+    //         break;
+    //     }
+    // }
+
+    // std::cout << "Test " << (correct ? "PASSED" : "FAILED") << std::endl;
+    std::cout << "Matrix h_C:" << std::endl;
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            std::cout << h_C[i * N + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+
+    std::cout << "\nReference Result (CPU):" << std::endl;
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            std::cout << h_C_ref[i * N + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+
+
+
     for (int i = 0; i < M * N; i++) {
-        if (fabs(h_C[i] - expected) > 1e-3) {
+        if (fabs(h_C[i] - h_C_ref[i]) > 1e-3) {
             correct = false;
             break;
         }
