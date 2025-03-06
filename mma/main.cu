@@ -20,15 +20,16 @@ __host__ void initialize_matrices(half *A, half *B, float *C) {
     }
   }
 
-  // for (int i = 0; i < M * K; i++) {
-  //     A[i] = __float2half(1.0f); // Initialize A with 1.0
-  // }
-  // for (int i = 0; i < K * N; i++) {
-  //     B[i] = __float2half(1.0f); // Initialize B with 1.0
-  // }
   for (int i = 0; i < M * N; i++) {
     C[i] = 0.0f; // Initialize C with 0.0
   }
+}
+
+__device__ void mma_m16n8k16_simulation(float &c0, float &c1, float &c2,
+                                        float &c3, int a0, int a1, int a2,
+                                        int a3, int b0, int b1) {
+  // TODO:
+  // the implementation of mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
 }
 
 #define WARP_SIZE 32
@@ -37,17 +38,17 @@ __host__ void initialize_matrices(half *A, half *B, float *C) {
 template <const int BM, const int BN>
 __global__ void mma_m16n8k16_ptx(half *A, half *B, int m, int n, int k,
                                  float *C) {
-  //块按warp划分后的warp的col数
+  // Number of warp columns after dividing the block by warps
   const int WARP_N = BN / 8;
-  //当前线程所属的warp的序号
+  // Index of the current warp within the block
   const int WRAP_ID = threadIdx.x / WARP_SIZE;
-  //当前线程在warp中的序号0~31
+  // Index of the current thread within the warp (0~31)
   const int LANE_ID = threadIdx.x % WARP_SIZE;
-  //当前warp的row序号
+  // Row index of the current warp
   const int WARP_ROW = WRAP_ID / WARP_N;
-  //当前warp的col序号
+  // Column index of the current warp
   const int WARP_COL = WRAP_ID % WARP_N;
-  //当前线程在warp中的对于A/B/C的row和col。
+  // Row and column indices for A/B/C for the current thread within the warp
   const int A_THREAD_ROW = LANE_ID / 4;
   const int A_THREAD_COL = LANE_ID % 4;
   const int B_THREAD_ROW = LANE_ID % 4;
@@ -55,49 +56,61 @@ __global__ void mma_m16n8k16_ptx(half *A, half *B, int m, int n, int k,
   const int C_THREAD_ROW = LANE_ID / 4;
   const int C_THREAD_COL = LANE_ID % 4;
 
-  // C = A*B + C,这里先初始化C全部初始化为0.
+  // Compute C = A * B + C, initializing C with 0
   float c[4] = {0.0, 0.0, 0.0, 0.0};
-  // 从A中读取8个fp16。
+  // Load 8 fp16 values from A
   half a[8];
-  // 从B中读取4个fp16
+  // Load 4 fp16 values from B
   half b[4];
-  // 转换为mma指令中的A的4个32位输入数据。
+  // Convert A values into 4 32-bit values for the MMA instruction
   half2 ra[4];
-  // 转换为mma指令中的B的2个32位输入数据。
+  // Convert B values into 2 32-bit values for the MMA instruction
   half2 rb[2];
 
-  //每个warp计算16*8的结果矩阵。
+  // Each warp computes a 16x8 result matrix
   const int WARP_ROW_OFFSET = WARP_ROW * 16 + blockIdx.y * BM;
   const int WARP_COL_OFFSET = WARP_COL * 8 + blockIdx.x * BN;
 
   for (int i = 0; i < K; i += 16) {
-    // 从全局内存读取A的8个fp16
+    // Load 8 fp16 values from global memory for A
     a[0] = A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW, A_THREAD_COL * 2 + i, K)];
-    a[1] = A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW, A_THREAD_COL * 2 + i + 1, K)];
-    a[2] = A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW + 8, A_THREAD_COL * 2 + i, K)];
-    a[3] = A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW + 8, A_THREAD_COL * 2 + i + 1, K)];
-    a[4] = A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW, A_THREAD_COL * 2 + i + 8, K)];
-    a[5] = A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW, A_THREAD_COL * 2 + i + 9, K)];
-    a[6] = A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW + 8, A_THREAD_COL * 2 + i + 8, K)];
-    a[7] = A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW + 8, A_THREAD_COL * 2 + i + 9, K)];
+    a[1] =
+        A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW, A_THREAD_COL * 2 + i + 1, K)];
+    a[2] =
+        A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW + 8, A_THREAD_COL * 2 + i, K)];
+    a[3] = A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW + 8,
+                    A_THREAD_COL * 2 + i + 1, K)];
+    a[4] =
+        A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW, A_THREAD_COL * 2 + i + 8, K)];
+    a[5] =
+        A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW, A_THREAD_COL * 2 + i + 9, K)];
+    a[6] = A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW + 8,
+                    A_THREAD_COL * 2 + i + 8, K)];
+    a[7] = A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW + 8,
+                    A_THREAD_COL * 2 + i + 9, K)];
 
-    // 从全局内存读取B的4个fp16
+    // Load 4 fp16 values from global memory for B
     b[0] = B[OFFSET(i + B_THREAD_ROW * 2, WARP_COL_OFFSET + B_THREAD_COL, N)];
-    b[1] = B[OFFSET(i + B_THREAD_ROW * 2 + 1, WARP_COL_OFFSET + B_THREAD_COL, N)];
-    b[2] = B[OFFSET(i + B_THREAD_ROW * 2 + 8, WARP_COL_OFFSET + B_THREAD_COL, N)];
-    b[3] = B[OFFSET(i + B_THREAD_ROW * 2 + 9, WARP_COL_OFFSET + B_THREAD_COL, N)];
+    b[1] =
+        B[OFFSET(i + B_THREAD_ROW * 2 + 1, WARP_COL_OFFSET + B_THREAD_COL, N)];
+    b[2] =
+        B[OFFSET(i + B_THREAD_ROW * 2 + 8, WARP_COL_OFFSET + B_THREAD_COL, N)];
+    b[3] =
+        B[OFFSET(i + B_THREAD_ROW * 2 + 9, WARP_COL_OFFSET + B_THREAD_COL, N)];
 
-    // mma指令中的A的4个32位数据
+    // Convert A values to 4 32-bit values for the MMA instruction
     ra[0] = __halves2half2(a[0], a[1]);
     ra[1] = __halves2half2(a[2], a[3]);
     ra[2] = __halves2half2(a[4], a[5]);
     ra[3] = __halves2half2(a[6], a[7]);
 
-    // mma指令中的B的2个32位数据
+    // Convert B values to 2 32-bit values for the MMA instruction
     rb[0] = __halves2half2(b[0], b[1]);
     rb[1] = __halves2half2(b[2], b[3]);
 
-    // mma指令计算 C=A*B+C
+    // Compute C = A * B + C using the MMA instruction
+#if 1
+
     asm("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
         " { %0, %1, %2, %3 }, "
         " { %4, %5, %6, %7 }, "
@@ -110,14 +123,24 @@ __global__ void mma_m16n8k16_ptx(half *A, half *B, int m, int n, int k,
           "r"(*(reinterpret_cast<int *>(&ra[3]))),
           "r"(*(reinterpret_cast<int *>(&rb[0]))),
           "r"(*(reinterpret_cast<int *>(&rb[1]))));
-
-    __syncthreads();
+#else
+    // C implementation for mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
+    mma_m16n8k16_simulation(
+        c[0], c[1], c[2], c[3], *(reinterpret_cast<int *>(&ra[0])),
+        *(reinterpret_cast<int *>(&ra[1])), *(reinterpret_cast<int *>(&ra[2])),
+        *(reinterpret_cast<int *>(&ra[3])), *(reinterpret_cast<int *>(&rb[0])),
+        *(reinterpret_cast<int *>(&rb[1])));
+#endif
   }
-  // 将mma的结果c写回到结果矩阵C中
-  C[OFFSET(WARP_ROW_OFFSET + C_THREAD_ROW, WARP_COL_OFFSET + C_THREAD_COL * 2, N)] = c[0];
-  C[OFFSET(WARP_ROW_OFFSET + C_THREAD_ROW, WARP_COL_OFFSET + C_THREAD_COL * 2 + 1, N)] = c[1];
-  C[OFFSET(WARP_ROW_OFFSET + C_THREAD_ROW + 8, WARP_COL_OFFSET + C_THREAD_COL * 2, N)] = c[2];
-  C[OFFSET(WARP_ROW_OFFSET + C_THREAD_ROW + 8, WARP_COL_OFFSET + C_THREAD_COL * 2 + 1, N)] = c[3];
+  // Store the computed C values back to the output matrix
+  C[OFFSET(WARP_ROW_OFFSET + C_THREAD_ROW, WARP_COL_OFFSET + C_THREAD_COL * 2,
+           N)] = c[0];
+  C[OFFSET(WARP_ROW_OFFSET + C_THREAD_ROW,
+           WARP_COL_OFFSET + C_THREAD_COL * 2 + 1, N)] = c[1];
+  C[OFFSET(WARP_ROW_OFFSET + C_THREAD_ROW + 8,
+           WARP_COL_OFFSET + C_THREAD_COL * 2, N)] = c[2];
+  C[OFFSET(WARP_ROW_OFFSET + C_THREAD_ROW + 8,
+           WARP_COL_OFFSET + C_THREAD_COL * 2 + 1, N)] = c[3];
 }
 
 #define FETCH_FLOAT4(pointer) *(reinterpret_cast<float4 *>(&(pointer)))
@@ -125,30 +148,30 @@ __global__ void mma_m16n8k16_ptx(half *A, half *B, int m, int n, int k,
 template <const int BM, const int BN>
 __global__ void mma_m16n8k16_ptx2(half *A, half *B, int M, int N, int K,
                                   float *C) {
-  //块按warp划分后的warp的col数
+  // Number of warp columns after dividing the block by warps
   const int WARP_N = BN / 8;
-  //当前warp在块中的序号
+  // Index of the current warp within the block
   const int WRAP_ID = threadIdx.x / WARP_SIZE;
-  //当前线程在warp中的序号0~31
+  // Index of the current thread within the warp (0~31)
   const int LANE_ID = threadIdx.x % WARP_SIZE;
-  //当前warp的row序号
+  // Row index of the current warp
   const int WARP_ROW = WRAP_ID / WARP_N;
-  //当前warp的col序号
+  // Column index of the current warp
   const int WARP_COL = WRAP_ID % WARP_N;
 
   const int C_THREAD_ROW = LANE_ID / 4;
   const int C_THREAD_COL = LANE_ID % 4;
 
-  // C=A*B + C，这里先初始化C全部初始化为0。
+  // C = A * B + C, initialize C with all zeros fi
   float c[4] = {0.0, 0.0, 0.0, 0.0};
-  // A的tile大小为BM*16
+  // Tile size of A: BM × 16
   __shared__ half s_a[BM][16];
-  // B的tile大小为16*BN
+  // Tile size of B: 16 × BN
   __shared__ half s_b[16][BN];
 
-  // mma指令中的A的4个32位输入数据。
+  // Four 32-bit input data for the A matrix in the MMA instruction.
   uint32_t ra[4];
-  // mma指令中的B的2个32位输入数据。
+  // Two 32-bit input data for the B matrix in the MMA instruction.
   uint32_t rb[2];
 
   const int WARP_ROW_OFFSET_A = WARP_ROW * 16;
@@ -170,14 +193,16 @@ __global__ void mma_m16n8k16_ptx2(half *A, half *B, int M, int N, int K,
   for (int i = 0; i < K; i += 16) {
     for (int offset = 0; offset < BM; offset += ROW_STRIDE_A) {
       if (offset + ROW_OFFSET_A < BM) {
-        FETCH_FLOAT4(s_a[offset + ROW_OFFSET_A][COL_OFFSET_A]) = FETCH_FLOAT4(A[OFFSET(BLOCK_ROW_OFFSET + offset + ROW_OFFSET_A,
+        FETCH_FLOAT4(s_a[offset + ROW_OFFSET_A][COL_OFFSET_A]) =
+            FETCH_FLOAT4(A[OFFSET(BLOCK_ROW_OFFSET + offset + ROW_OFFSET_A,
                                   COL_OFFSET_A + i, K)]);
       }
     }
 
     for (int offset = 0; offset < 16; offset += ROW_STRIDE_B) {
       if (offset + ROW_OFFSET_B < 16) {
-        FETCH_FLOAT4(s_b[offset + ROW_OFFSET_B][COL_OFFSET_B]) = FETCH_FLOAT4(B[OFFSET(i + offset + ROW_OFFSET_B,
+        FETCH_FLOAT4(s_b[offset + ROW_OFFSET_B][COL_OFFSET_B]) =
+            FETCH_FLOAT4(B[OFFSET(i + offset + ROW_OFFSET_B,
                                   BLOCK_COL_OFFSET + COL_OFFSET_B, N)]);
       }
     }
@@ -188,13 +213,15 @@ __global__ void mma_m16n8k16_ptx2(half *A, half *B, int M, int N, int K,
     uint32_t addr_b =
         __cvta_generic_to_shared(&s_b[LANE_ID % 16][WARP_COL_OFFSET_B]);
 
-    // 对于A矩阵，需要加载4个8*8的矩阵，warp内的32个线程参与
+    // For matrix A, load four 8×8 submatrices, with all 32 threads in a warp
+    // participating
     asm volatile(
         "ldmatrix.sync.aligned.x4.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];"
         : "=r"(ra[0]), "=r"(ra[1]), "=r"(ra[2]), "=r"(ra[3])
         : "r"(addr_a));
 
-    // 对于B矩阵，只需要加载2个8*8的矩阵，warp内的前16个线程参与
+    // For matrix B, only load two 8×8 submatrices, with the first 16 threads in
+    // the warp participating
     if (LANE_ID < 16) {
       asm volatile(
           "ldmatrix.sync.aligned.x2.trans.m8n8.shared.b16 {%0, %1}, [%2];"
@@ -202,7 +229,7 @@ __global__ void mma_m16n8k16_ptx2(half *A, half *B, int M, int N, int K,
           : "r"(addr_b));
     }
 
-    // mma指令计算 C=A*B+C
+    // MMA instruction computes C = A * B + C
     asm("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
         " { %0, %1, %2, %3 }, "
         " { %4, %5, %6, %7 }, "
@@ -214,11 +241,15 @@ __global__ void mma_m16n8k16_ptx2(half *A, half *B, int M, int N, int K,
 
     __syncthreads();
   }
-  // 将mma的结果c写回到结果矩阵C中
-  C[OFFSET(WARP_ROW_OFFSET_C + C_THREAD_ROW, WARP_COL_OFFSET_C + C_THREAD_COL * 2, N)] = c[0];
-  C[OFFSET(WARP_ROW_OFFSET_C + C_THREAD_ROW, WARP_COL_OFFSET_C + C_THREAD_COL * 2 + 1, N)] = c[1];
-  C[OFFSET(WARP_ROW_OFFSET_C + C_THREAD_ROW + 8, WARP_COL_OFFSET_C + C_THREAD_COL * 2, N)] = c[2];
-  C[OFFSET(WARP_ROW_OFFSET_C + C_THREAD_ROW + 8, WARP_COL_OFFSET_C + C_THREAD_COL * 2 + 1, N)] = c[3];
+  // Store the MMA results back into the output matrix C
+  C[OFFSET(WARP_ROW_OFFSET_C + C_THREAD_ROW,
+           WARP_COL_OFFSET_C + C_THREAD_COL * 2, N)] = c[0];
+  C[OFFSET(WARP_ROW_OFFSET_C + C_THREAD_ROW,
+           WARP_COL_OFFSET_C + C_THREAD_COL * 2 + 1, N)] = c[1];
+  C[OFFSET(WARP_ROW_OFFSET_C + C_THREAD_ROW + 8,
+           WARP_COL_OFFSET_C + C_THREAD_COL * 2, N)] = c[2];
+  C[OFFSET(WARP_ROW_OFFSET_C + C_THREAD_ROW + 8,
+           WARP_COL_OFFSET_C + C_THREAD_COL * 2 + 1, N)] = c[3];
 }
 
 void matrix_multiplication_cpu(half *A, half *B, float *C, int m, int n,
@@ -261,27 +292,11 @@ void test_1(void) {
   dim3 grid_dim(1, 1);
 
   mma_m16n8k16_ptx<BM, BN><<<grid_dim, block_dim>>>(d_A, d_B, M, N, K, d_C);
+  cudaDeviceSynchronize();
   cudaMemcpy(h_C, d_C, M * N * sizeof(float), cudaMemcpyDeviceToHost);
 
   // Validate results
-  // float expected = K * 1.0f;
   bool correct = true;
-
-  // std::cout << "Matrix h_C:" << std::endl;
-  // for (int i = 0; i < M; ++i) {
-  //     for (int j = 0; j < N; ++j) {
-  //         std::cout << h_C[i * N + j] << " ";
-  //     }
-  //     std::cout << std::endl;
-  // }
-
-  // std::cout << "\nReference Result (CPU):" << std::endl;
-  // for (int i = 0; i < M; ++i) {
-  //     for (int j = 0; j < N; ++j) {
-  //         std::cout << h_C_ref[i * N + j] << " ";
-  //     }
-  //     std::cout << std::endl;
-  // }
 
   for (int i = 0; i < M * N; i++) {
     if (fabs(h_C[i] - h_C_ref[i]) > 1e-3) {
@@ -327,24 +342,7 @@ void test_2(void) {
   cudaMemcpy(h_C, d_C, M * N * sizeof(float), cudaMemcpyDeviceToHost);
 
   // Validate results
-  // float expected = K * 1.0f;
   bool correct = true;
-
-  // std::cout << "Matrix h_C:" << std::endl;
-  // for (int i = 0; i < M; ++i) {
-  //     for (int j = 0; j < N; ++j) {
-  //         std::cout << h_C[i * N + j] << " ";
-  //     }
-  //     std::cout << std::endl;
-  // }
-
-  // std::cout << "\nReference Result (CPU):" << std::endl;
-  // for (int i = 0; i < M; ++i) {
-  //     for (int j = 0; j < N; ++j) {
-  //         std::cout << h_C_ref[i * N + j] << " ";
-  //     }
-  //     std::cout << std::endl;
-  // }
 
   for (int i = 0; i < M * N; i++) {
     if (fabs(h_C[i] - h_C_ref[i]) > 1e-3) {
