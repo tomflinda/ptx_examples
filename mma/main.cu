@@ -1,366 +1,302 @@
-#include <cuda_fp16.h>
 #include <iostream>
-#include <vector>
+#include <cuda_runtime.h>
+#include <stdio.h>
+#include <cuda.h>
+#include <mma.h>
 
-const int M = 32;
-const int N = 32;
-const int K = 16;
-
-__host__ void initialize_matrices(half *A, half *B, float *C) {
-
-  for (int i = 0; i < M; ++i) {
-    for (int j = 0; j < K; ++j) {
-      A[i * K + j] = __float2half(i * K + j);
-    }
-  }
-
-  for (int i = 0; i < K; ++i) {
-    for (int j = 0; j < N; ++j) {
-      B[i * N + j] = __float2half(i * N + j);
-    }
-  }
-
-  for (int i = 0; i < M * N; i++) {
-    C[i] = 0.0f; // Initialize C with 0.0
-  }
-}
-
-__device__ void mma_m16n8k16_simulation(float &c0, float &c1, float &c2,
-                                        float &c3, int a0, int a1, int a2,
-                                        int a3, int b0, int b1) {
-  // TODO:
-  // the implementation of mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
-}
+using namespace nvcuda;
 
 #define WARP_SIZE 32
-#define OFFSET(row, col, ld) ((row) * (ld) + (col))
 
-template <const int BM, const int BN>
-__global__ void mma_m16n8k16_ptx(half *A, half *B, int m, int n, int k,
-                                 float *C) {
-  // Number of warp columns after dividing the block by warps
-  const int WARP_N = BN / 8;
-  // Index of the current warp within the block
-  const int WRAP_ID = threadIdx.x / WARP_SIZE;
-  // Index of the current thread within the warp (0~31)
-  const int LANE_ID = threadIdx.x % WARP_SIZE;
-  // Row index of the current warp
-  const int WARP_ROW = WRAP_ID / WARP_N;
-  // Column index of the current warp
-  const int WARP_COL = WRAP_ID % WARP_N;
-  // Row and column indices for A/B/C for the current thread within the warp
-  const int A_THREAD_ROW = LANE_ID / 4;
-  const int A_THREAD_COL = LANE_ID % 4;
-  const int B_THREAD_ROW = LANE_ID % 4;
-  const int B_THREAD_COL = LANE_ID / 4;
-  const int C_THREAD_ROW = LANE_ID / 4;
-  const int C_THREAD_COL = LANE_ID % 4;
-
-  // Compute C = A * B + C, initializing C with 0
-  float c[4] = {0.0, 0.0, 0.0, 0.0};
-  // Load 8 fp16 values from A
-  half a[8];
-  // Load 4 fp16 values from B
-  half b[4];
-  // Convert A values into 4 32-bit values for the MMA instruction
-  half2 ra[4];
-  // Convert B values into 2 32-bit values for the MMA instruction
-  half2 rb[2];
-
-  // Each warp computes a 16x8 result matrix
-  const int WARP_ROW_OFFSET = WARP_ROW * 16 + blockIdx.y * BM;
-  const int WARP_COL_OFFSET = WARP_COL * 8 + blockIdx.x * BN;
-
-  for (int i = 0; i < K; i += 16) {
-    // Load 8 fp16 values from global memory for A
-    a[0] = A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW, A_THREAD_COL * 2 + i, K)];
-    a[1] =
-        A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW, A_THREAD_COL * 2 + i + 1, K)];
-    a[2] =
-        A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW + 8, A_THREAD_COL * 2 + i, K)];
-    a[3] = A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW + 8,
-                    A_THREAD_COL * 2 + i + 1, K)];
-    a[4] =
-        A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW, A_THREAD_COL * 2 + i + 8, K)];
-    a[5] =
-        A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW, A_THREAD_COL * 2 + i + 9, K)];
-    a[6] = A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW + 8,
-                    A_THREAD_COL * 2 + i + 8, K)];
-    a[7] = A[OFFSET(WARP_ROW_OFFSET + A_THREAD_ROW + 8,
-                    A_THREAD_COL * 2 + i + 9, K)];
-
-    // Load 4 fp16 values from global memory for B
-    b[0] = B[OFFSET(i + B_THREAD_ROW * 2, WARP_COL_OFFSET + B_THREAD_COL, N)];
-    b[1] =
-        B[OFFSET(i + B_THREAD_ROW * 2 + 1, WARP_COL_OFFSET + B_THREAD_COL, N)];
-    b[2] =
-        B[OFFSET(i + B_THREAD_ROW * 2 + 8, WARP_COL_OFFSET + B_THREAD_COL, N)];
-    b[3] =
-        B[OFFSET(i + B_THREAD_ROW * 2 + 9, WARP_COL_OFFSET + B_THREAD_COL, N)];
-
-    // Convert A values to 4 32-bit values for the MMA instruction
-    ra[0] = __halves2half2(a[0], a[1]);
-    ra[1] = __halves2half2(a[2], a[3]);
-    ra[2] = __halves2half2(a[4], a[5]);
-    ra[3] = __halves2half2(a[6], a[7]);
-
-    // Convert B values to 2 32-bit values for the MMA instruction
-    rb[0] = __halves2half2(b[0], b[1]);
-    rb[1] = __halves2half2(b[2], b[3]);
-
-    // Compute C = A * B + C using the MMA instruction
-#if 1
-
-    asm("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-        " { %0, %1, %2, %3 }, "
-        " { %4, %5, %6, %7 }, "
-        " { %8, %9 }, "
-        " { %0, %1, %2, %3 };"
-        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
-        : "r"(*(reinterpret_cast<int *>(&ra[0]))),
-          "r"(*(reinterpret_cast<int *>(&ra[1]))),
-          "r"(*(reinterpret_cast<int *>(&ra[2]))),
-          "r"(*(reinterpret_cast<int *>(&ra[3]))),
-          "r"(*(reinterpret_cast<int *>(&rb[0]))),
-          "r"(*(reinterpret_cast<int *>(&rb[1]))));
-#else
-    // C implementation for mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
-    mma_m16n8k16_simulation(
-        c[0], c[1], c[2], c[3], *(reinterpret_cast<int *>(&ra[0])),
-        *(reinterpret_cast<int *>(&ra[1])), *(reinterpret_cast<int *>(&ra[2])),
-        *(reinterpret_cast<int *>(&ra[3])), *(reinterpret_cast<int *>(&rb[0])),
-        *(reinterpret_cast<int *>(&rb[1])));
-#endif
+#define CHECK_CUDA(status)                                              \
+  {                                                                     \
+    cudaError_t error = status;                                         \
+    if (error != cudaSuccess) {                                         \
+      std::cerr << "Got bad cuda status: " << cudaGetErrorString(error) \
+                << " at line: " << __LINE__ << std::endl;               \
+      exit(EXIT_FAILURE);                                               \
+    }                                                                   \
   }
-  // Store the computed C values back to the output matrix
-  C[OFFSET(WARP_ROW_OFFSET + C_THREAD_ROW, WARP_COL_OFFSET + C_THREAD_COL * 2,
-           N)] = c[0];
-  C[OFFSET(WARP_ROW_OFFSET + C_THREAD_ROW,
-           WARP_COL_OFFSET + C_THREAD_COL * 2 + 1, N)] = c[1];
-  C[OFFSET(WARP_ROW_OFFSET + C_THREAD_ROW + 8,
-           WARP_COL_OFFSET + C_THREAD_COL * 2, N)] = c[2];
-  C[OFFSET(WARP_ROW_OFFSET + C_THREAD_ROW + 8,
-           WARP_COL_OFFSET + C_THREAD_COL * 2 + 1, N)] = c[3];
+
+//mma指令
+#define HMMA16816(RD0, RD1, RA0, RA1, RA2, RA3, RB0, RB1, RC0, RC1)                                                    \
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0, %1}, {%2, %3, %4, %5}, {%6, %7}, {%8, %9};\n" \
+                 : "=r"(RD0), "=r"(RD1)                                                                                \
+                 : "r"(RA0), "r"(RA1), "r"(RA2), "r"(RA3), "r"(RB0), "r"(RB1), "r"(RC0), "r"(RC1))
+
+//加载A矩阵(行存储)
+#define LDMATRIX_X4(R0, R1, R2, R3, addr)                                             \
+    asm volatile("ldmatrix.sync.aligned.x4.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];\n" \
+                 : "=r"(R0), "=r"(R1), "=r"(R2), "=r"(R3)                             \
+                 : "l"(addr))
+
+//加载B矩阵(行存储),需要转置
+#define LDMATRIX_X2(R0, R1, addr) \
+    asm volatile("ldmatrix.sync.aligned.x2.trans.m8n8.shared.b16 {%0, %1}, [%2];\n" : "=r"(R0), "=r"(R1) : "l"(addr))
+
+//异步加载数据
+#define CP_ASYNC_CG(dst, src, Bytes) \
+    asm volatile("cp.async.cg.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(dst), "l"(src), "n"(Bytes))
+#define CP_ASYNC_COMMIT_GROUP() asm volatile("cp.async.commit_group;\n" ::)
+#define CP_ASYNC_WAIT_GROUP(N) asm volatile("cp.async.wait_group %0;\n" ::"n"(N))
+#define CP_ASYNC_WAIT_ALL() asm volatile("cp.async.wait_all;\n" ::)
+
+/*
+测试一:从dram中加载数据,按mma的layout,放在寄存器中,执行mma执行
+*/
+__global__ void ptx_mma_global(half* input_A, half* input_B, half* input_C, int M, int N, int K) {
+    
+    const size_t laneid = threadIdx.x % WARP_SIZE;
+
+    uint32_t RA[4];
+    uint32_t RB[2];
+    uint32_t RC[2];
+    
+    RC[0]=0;
+    RC[1]=0;
+    
+    //A矩阵: M*K 16*16
+    /*
+    指令文档中要求每一个thread按以下规则存放数据
+    groupID           = %laneid >> 2
+    threadID_in_group = %laneid % 4
+
+    row =      groupID            for ai where  0 <= i < 2 || 4 <= i < 6
+               groupID + 8         Otherwise
+
+    col =  (threadID_in_group * 2) + (i & 0x1)          for ai where i <  4
+    (threadID_in_group * 2) + (i & 0x1) + 8      for ai where i >= 4
+    */
+    
+    clock_t begin=clock64();
+    int groupID           = laneid /4;
+    int threadID_in_group = laneid % 4;
+
+    int row_a0=groupID;
+    int col_a0=(threadID_in_group * 2) + (0 & 0x1);
+    
+    int row_a2=groupID + 8;
+    int col_a2=(threadID_in_group * 2) + (2 & 0x1);
+
+    int row_a4=groupID;
+    int col_a4=(threadID_in_group * 2) + (4 & 0x1) + 8;
+    
+    int row_a6=groupID + 8;
+    int col_a6=(threadID_in_group * 2) + (6 & 0x1) + 8;
+    //A矩阵a0 a1是连续存放的,这里用uint32_t来存放
+    RA[0]=*(uint32_t*)&input_A[row_a0*K+col_a0];
+    RA[1]=*(uint32_t*)&input_A[row_a2*K+col_a2];
+    RA[2]=*(uint32_t*)&input_A[row_a4*K+col_a4];
+    RA[3]=*(uint32_t*)&input_A[row_a6*K+col_a6];
+    
+    //B矩阵 K*N=16*8
+    /*
+    groupID           = %laneid >> 2
+    threadID_in_group = %laneid % 4
+
+    row =  (threadID_in_group * 2) + (i & 0x1)           for bi where i <  2
+           (threadID_in_group * 2) + (i & 0x1) + 8       for bi where i >= 2
+
+    col = groupID
+    */
+    //B矩阵非连续,每个元素单独提取
+    int row_b0=(threadID_in_group * 2) + (0 & 0x1);
+    int col_b0=groupID;
+    
+    int row_b1=(threadID_in_group * 2) + (1 & 0x1);
+    int col_b1=groupID;
+    
+    int row_b2=(threadID_in_group * 2) + (2 & 0x1) + 8 ;
+    int col_b2=groupID;
+    
+    int row_b3=(threadID_in_group * 2) + (3 & 0x1) + 8 ;
+    int col_b3=groupID;
+   
+    half *ptr_b=(half*)RB;
+    ptr_b[0]=*(half*)&input_B[row_b0*N+col_b0];
+    ptr_b[1]=*(half*)&input_B[row_b1*N+col_b1];
+    ptr_b[2]=*(half*)&input_B[row_b2*N+col_b2];
+    ptr_b[3]=*(half*)&input_B[row_b3*N+col_b3];
+    
+    //C矩阵 M*N=16*8
+    /*
+    groupID           = %laneid >> 2
+    threadID_in_group = %laneid % 4
+
+    row =      groupID                               for ci where i <  2
+             groupID + 8                             for ci where i >= 2
+
+    col =  (threadID_in_group * 2) + (i & 0x1)        for ci where i = {0,..,3}
+    */
+    
+    int row_c0=groupID;
+    int col_c0=(threadID_in_group * 2) + (0 & 0x1);
+    
+    int row_c2=groupID + 8;
+    int col_c2=(threadID_in_group * 2) + (2 & 0x1);
+
+    HMMA16816(RC[0], RC[1],
+              RA[0], RA[1], RA[2], RA[3], 
+              RB[0],RB[1],
+              RC[0], RC[1]);    
+
+    *(uint32_t*)&input_C[row_c0*N+col_c0]=RC[0];
+    *(uint32_t*)&input_C[row_c2*N+col_c2]=RC[1];  
+    clock_t end=clock64();    
+    if(laneid==0)
+    {
+        printf("ptx_mma_global kernel e2e:%ld\n",end-begin);
+    }
 }
 
-#define FETCH_FLOAT4(pointer) *(reinterpret_cast<float4 *>(&(pointer)))
+/*
+测试二:从dram中加载数据到share memory中,再用ldmatrix指令加载到寄存器中,执行mma执行
+*/
+__global__ void ptx_mma_shared(half* input_A, half* input_B, half* input_C, int M, int N, int K) {
+    
+    const size_t laneid = threadIdx.x % WARP_SIZE;
+    
+    __shared__ half A[16*16];
+    __shared__ half B[16*8];
+   
+    clock_t begin=clock64();
 
-template <const int BM, const int BN>
-__global__ void mma_m16n8k16_ptx2(half *A, half *B, int M, int N, int K,
-                                  float *C) {
-  // Number of warp columns after dividing the block by warps
-  const int WARP_N = BN / 8;
-  // Index of the current warp within the block
-  const int WRAP_ID = threadIdx.x / WARP_SIZE;
-  // Index of the current thread within the warp (0~31)
-  const int LANE_ID = threadIdx.x % WARP_SIZE;
-  // Row index of the current warp
-  const int WARP_ROW = WRAP_ID / WARP_N;
-  // Column index of the current warp
-  const int WARP_COL = WRAP_ID % WARP_N;
+    uint32_t smem_lane_addr = __cvta_generic_to_shared(&A[laneid*8]); 
+    CP_ASYNC_CG(smem_lane_addr,&input_A[laneid*8],16);
 
-  const int C_THREAD_ROW = LANE_ID / 4;
-  const int C_THREAD_COL = LANE_ID % 4;
-
-  // C = A * B + C, initialize C with all zeros fi
-  float c[4] = {0.0, 0.0, 0.0, 0.0};
-  // Tile size of A: BM × 16
-  __shared__ half s_a[BM][16];
-  // Tile size of B: 16 × BN
-  __shared__ half s_b[16][BN];
-
-  // Four 32-bit input data for the A matrix in the MMA instruction.
-  uint32_t ra[4];
-  // Two 32-bit input data for the B matrix in the MMA instruction.
-  uint32_t rb[2];
-
-  const int WARP_ROW_OFFSET_A = WARP_ROW * 16;
-  const int WARP_COL_OFFSET_B = WARP_COL * 8;
-  const int WARP_ROW_OFFSET_C = WARP_ROW * 16 + blockIdx.y * BM;
-  const int WARP_COL_OFFSET_C = WARP_COL * 8 + blockIdx.x * BN;
-
-  const int BLOCK_ROW_OFFSET = blockIdx.y * BM;
-  const int BLOCK_COL_OFFSET = blockIdx.x * BN;
-
-  const int NUM_ELEMENT_PER_THREAD = sizeof(float4) / sizeof(half);
-  const int ROW_OFFSET_A = threadIdx.x * NUM_ELEMENT_PER_THREAD / 16;
-  const int COL_OFFSET_A = (threadIdx.x * NUM_ELEMENT_PER_THREAD) % 16;
-  const int ROW_STRIDE_A = blockDim.x * NUM_ELEMENT_PER_THREAD / 16;
-  const int ROW_OFFSET_B = threadIdx.x * NUM_ELEMENT_PER_THREAD / BN;
-  const int COL_OFFSET_B = (threadIdx.x * NUM_ELEMENT_PER_THREAD) % BN;
-  const int ROW_STRIDE_B = blockDim.x * NUM_ELEMENT_PER_THREAD / BN;
-
-  for (int i = 0; i < K; i += 16) {
-    for (int offset = 0; offset < BM; offset += ROW_STRIDE_A) {
-      if (offset + ROW_OFFSET_A < BM) {
-        FETCH_FLOAT4(s_a[offset + ROW_OFFSET_A][COL_OFFSET_A]) =
-            FETCH_FLOAT4(A[OFFSET(BLOCK_ROW_OFFSET + offset + ROW_OFFSET_A,
-                                  COL_OFFSET_A + i, K)]);
-      }
+    if(laneid<16)
+    {        
+        uint32_t smem_lane_addr = __cvta_generic_to_shared(&B[laneid*8]); 
+        CP_ASYNC_CG(smem_lane_addr,&input_B[laneid*8],16);
     }
 
-    for (int offset = 0; offset < 16; offset += ROW_STRIDE_B) {
-      if (offset + ROW_OFFSET_B < 16) {
-        FETCH_FLOAT4(s_b[offset + ROW_OFFSET_B][COL_OFFSET_B]) =
-            FETCH_FLOAT4(B[OFFSET(i + offset + ROW_OFFSET_B,
-                                  BLOCK_COL_OFFSET + COL_OFFSET_B, N)]);
-      }
-    }
+    CP_ASYNC_COMMIT_GROUP();
+    CP_ASYNC_WAIT_GROUP(0);
     __syncthreads();
 
-    uint32_t addr_a = __cvta_generic_to_shared(
-        &s_a[WARP_ROW_OFFSET_A + LANE_ID % 16][(LANE_ID / 16) * 8]);
-    uint32_t addr_b =
-        __cvta_generic_to_shared(&s_b[LANE_ID % 16][WARP_COL_OFFSET_B]);
+    uint32_t RA[4];
+    uint32_t RB[2];
+    uint32_t RC[2];
+    
+    RC[0]=0;
+    RC[1]=0;
+    
+    /*
+      文档要求:
+        When reading 8x8 matrices, a group of four consecutive threads loads 16 bytes. The matrix addresses must be naturally aligned accordingly.
+        Each thread in a warp loads fragments of a row
+      因此:
+        1.对于A矩阵(16*16),需要分成4个8*8的矩阵,二行二列,由32个线程一起完成,一行8个元素,half类型,16字节,由连续的4个thread负责
+          一个8*8的矩阵,需要32个线程协同完成(一个warp)
+        2.ldmatrix要求传入的地址为一行的首地址,将laneid转成每行的首地址
+          lanid%16->生成0-15的行号(因为需要每行首地址)->每一行的步进单位为16(2列)
+          lanid/16->生成0-1的列号(因为有二列)->每一列的步进单位为8
+          首行地址=laneid % 16 * 16 + laneid / 16 * 8;
+          print([(x%16,x//16) for x in range(32)])
+          [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (7, 0), (8, 0), (9, 0), (10, 0), (11, 0), (12, 0), (13, 0), (14, 0), (15, 0), 
+           (0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1), (8, 1), (9, 1), (10, 1), (11, 1), (12, 1), (13, 1), (14, 1), (15, 1)]
+           从第0列到第1列
+        3.对于B矩阵(16*8),只有一列,首行地址=laneid*8 
+    */
+    
+    int aTile_index = laneid % 16 * 16 + laneid / 16 * 8;
+    LDMATRIX_X4(RA[0], RA[1], RA[2], RA[3], __cvta_generic_to_shared(&A[aTile_index]));
+    
+    int bTile_index = laneid * 8;
+    LDMATRIX_X2(RB[0], RB[1], __cvta_generic_to_shared(&B[bTile_index]));
+    
+    //执行mma执行
+    HMMA16816(RC[0], RC[1],
+              RA[0], RA[1], RA[2], RA[3],
+              RB[0], RB[1],
+              RC[0], RC[1]);   
+               
+    //C矩阵 M*N=16*8
+    /*
+    groupID           = %laneid >> 2
+    threadID_in_group = %laneid % 4
 
-    // For matrix A, load four 8×8 submatrices, with all 32 threads in a warp
-    // participating
-    asm volatile(
-        "ldmatrix.sync.aligned.x4.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];"
-        : "=r"(ra[0]), "=r"(ra[1]), "=r"(ra[2]), "=r"(ra[3])
-        : "r"(addr_a));
+    row =      groupID                               for ci where i <  2
+             groupID + 8                             for ci where i >= 2
 
-    // For matrix B, only load two 8×8 submatrices, with the first 16 threads in
-    // the warp participating
-    if (LANE_ID < 16) {
-      asm volatile(
-          "ldmatrix.sync.aligned.x2.trans.m8n8.shared.b16 {%0, %1}, [%2];"
-          : "=r"(rb[0]), "=r"(rb[1])
-          : "r"(addr_b));
-    }
+    col =  (threadID_in_group * 2) + (i & 0x1)        for ci where i = {0,..,3}
+    */
 
-    // MMA instruction computes C = A * B + C
-    asm("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-        " { %0, %1, %2, %3 }, "
-        " { %4, %5, %6, %7 }, "
-        " { %8, %9 }, "
-        " { %0, %1, %2, %3 };"
-        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
-        : "r"(ra[0]), "r"(ra[1]), "r"(ra[2]), "r"(ra[3]), "r"(rb[0]),
-          "r"(rb[1]));
+    int groupID           = laneid /4;
+    int threadID_in_group = laneid % 4;
+    
+    int row_c0 = groupID;
+    int col_c0 = (threadID_in_group * 2) + (0 & 0x1);
+    
+    int row_c2 = groupID + 8;
+    int col_c2 = (threadID_in_group * 2) + (2 & 0x1);              
+              
+    //写回到DRAM
+    *(uint32_t*)&input_C[row_c0*N+col_c0]=RC[0];
+    *(uint32_t*)&input_C[row_c2*N+col_c2]=RC[1];    
 
-    __syncthreads();
-  }
-  // Store the MMA results back into the output matrix C
-  C[OFFSET(WARP_ROW_OFFSET_C + C_THREAD_ROW,
-           WARP_COL_OFFSET_C + C_THREAD_COL * 2, N)] = c[0];
-  C[OFFSET(WARP_ROW_OFFSET_C + C_THREAD_ROW,
-           WARP_COL_OFFSET_C + C_THREAD_COL * 2 + 1, N)] = c[1];
-  C[OFFSET(WARP_ROW_OFFSET_C + C_THREAD_ROW + 8,
-           WARP_COL_OFFSET_C + C_THREAD_COL * 2, N)] = c[2];
-  C[OFFSET(WARP_ROW_OFFSET_C + C_THREAD_ROW + 8,
-           WARP_COL_OFFSET_C + C_THREAD_COL * 2 + 1, N)] = c[3];
+    clock_t end=clock64();
+    if(laneid==0)
+    {
+        printf("ptx_mma_shared kernel e2e:%ld\n",end-begin);
+    }    
 }
 
-void matrix_multiplication_cpu(half *A, half *B, float *C, int m, int n,
-                               int k) {
-  for (int i = 0; i < M; ++i) {
-    for (int j = 0; j < N; ++j) {
-      float sum = 0.0;
-      for (int k = 0; k < K; ++k) {
-        sum += __half2float(A[i * K + k]) * __half2float(B[k * N + j]);
-      }
-      C[i * N + j] = sum;
+int M=16;
+int N=8;    
+int K=16;
+
+void dump(half *host_c)
+{
+    for(int r=0;r<M;r++)
+    {
+       for(int c=0;c<N;c++)
+       {
+        printf("%8.3f ",__half2float(host_c[r*N+c]));
+       }
+       printf("\n");
     }
-  }
-}
-
-void test_1(void) {
-
-  half *d_A, *d_B;
-  float *d_C;
-  half h_A[M * K], h_B[K * N];
-  float h_C[M * N];
-  float h_C_ref[M * N];
-
-  initialize_matrices(h_A, h_B, h_C);
-
-  matrix_multiplication_cpu(h_A, h_B, h_C_ref, M, N, K);
-
-  cudaMalloc(&d_A, M * K * sizeof(half));
-  cudaMalloc(&d_B, K * N * sizeof(half));
-  cudaMalloc(&d_C, M * N * sizeof(float));
-
-  cudaMemcpy(d_A, h_A, M * K * sizeof(half), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_B, h_B, K * N * sizeof(half), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_C, h_C, M * N * sizeof(float), cudaMemcpyHostToDevice);
-
-  const int BM = 32;
-  const int BN = 32;
-  const int WARP_NUM = (BM * BN) / (16 * 8);
-  dim3 block_dim(WARP_NUM * 32);
-  dim3 grid_dim(1, 1);
-
-  mma_m16n8k16_ptx<BM, BN><<<grid_dim, block_dim>>>(d_A, d_B, M, N, K, d_C);
-  cudaDeviceSynchronize();
-  cudaMemcpy(h_C, d_C, M * N * sizeof(float), cudaMemcpyDeviceToHost);
-
-  // Validate results
-  bool correct = true;
-
-  for (int i = 0; i < M * N; i++) {
-    if (fabs(h_C[i] - h_C_ref[i]) > 1e-3) {
-      correct = false;
-      break;
-    }
-  }
-
-  std::cout << "Test1 " << (correct ? "PASSED" : "FAILED") << std::endl;
-
-  cudaFree(d_A);
-  cudaFree(d_B);
-  cudaFree(d_C);
-}
-
-void test_2(void) {
-
-  half *d_A, *d_B;
-  float *d_C;
-  half h_A[M * K], h_B[K * N];
-  float h_C[M * N];
-  float h_C_ref[M * N];
-
-  initialize_matrices(h_A, h_B, h_C);
-
-  matrix_multiplication_cpu(h_A, h_B, h_C_ref, M, N, K);
-
-  cudaMalloc(&d_A, M * K * sizeof(half));
-  cudaMalloc(&d_B, K * N * sizeof(half));
-  cudaMalloc(&d_C, M * N * sizeof(float));
-
-  cudaMemcpy(d_A, h_A, M * K * sizeof(half), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_B, h_B, K * N * sizeof(half), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_C, h_C, M * N * sizeof(float), cudaMemcpyHostToDevice);
-
-  const int BM = 32;
-  const int BN = 32;
-  const int WARP_NUM = (BM * BN) / (16 * 8);
-  dim3 block_dim(WARP_NUM * 32);
-  dim3 grid_dim(1, 1);
-
-  mma_m16n8k16_ptx2<BM, BN><<<grid_dim, block_dim>>>(d_A, d_B, M, N, K, d_C);
-  cudaMemcpy(h_C, d_C, M * N * sizeof(float), cudaMemcpyDeviceToHost);
-
-  // Validate results
-  bool correct = true;
-
-  for (int i = 0; i < M * N; i++) {
-    if (fabs(h_C[i] - h_C_ref[i]) > 1e-3) {
-      correct = false;
-      break;
-    }
-  }
-
-  std::cout << "Test2 " << (correct ? "PASSED" : "FAILED") << std::endl;
-
-  cudaFree(d_A);
-  cudaFree(d_B);
-  cudaFree(d_C);
 }
 
 int main() {
-
-  test_1();
-  test_2();
-  return 0;
+    half *host_a = new half[M*K];
+    half *host_b = new half[K*N];
+    half *host_c = new half[M*N];
+    
+    half *dev_a;
+    half *dev_b;
+    half *dev_c;
+    
+    CHECK_CUDA(cudaMalloc(&dev_a, sizeof(half)*M*K));
+    CHECK_CUDA(cudaMalloc(&dev_b, sizeof(half)*K*N));
+    CHECK_CUDA(cudaMalloc(&dev_c, sizeof(half)*M*N));
+    
+    for(int i = 0; i < M*K; ++i) host_a[i] = __float2half(i*0.01);
+    for(int i = 0; i < K*N; ++i) host_b[i] = __float2half(i*0.01);
+    
+    CHECK_CUDA(cudaMemcpy(dev_a, host_a, sizeof(half)*M*K,cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(dev_b, host_b, sizeof(half)*K*N,cudaMemcpyHostToDevice));
+    for(int i = 0; i < M*N; ++i) host_c[i] = 0;
+    CHECK_CUDA(cudaMemcpy(dev_c, host_c, sizeof(half)*K*N,cudaMemcpyHostToDevice));
+    
+    
+    ptx_mma_global<<<1, 32>>>(dev_a, dev_b,dev_c,M,N,K);cudaDeviceSynchronize();
+    cudaMemcpy(host_c, dev_c, sizeof(half)*M*N, cudaMemcpyDeviceToHost);
+    dump(host_c);
+    printf("------------------------------------------------------------\n");
+    CHECK_CUDA(cudaMemcpy(dev_a, host_a, sizeof(half)*M*K,cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(dev_b, host_b, sizeof(half)*K*N,cudaMemcpyHostToDevice));
+    for(int i = 0; i < M*N; ++i) host_c[i] = 0;
+    CHECK_CUDA(cudaMemcpy(dev_c, host_c, sizeof(half)*K*N,cudaMemcpyHostToDevice));    
+    ptx_mma_shared<<<1, 32>>>(dev_a, dev_b,dev_c,M,N,K);cudaDeviceSynchronize();
+    cudaMemcpy(host_c, dev_c, sizeof(half)*M*N, cudaMemcpyDeviceToHost);
+    dump(host_c);
+    
+    cudaFree(dev_a);
+    cudaFree(dev_b);
+    cudaFree(dev_c);
+    free(host_a);
+    free(host_b);
+    free(host_c);
+    return 0;
 }
